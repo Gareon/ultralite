@@ -173,7 +173,7 @@ VIF_MAP = {
     0x5A: ("flow_temperature",    lambda v, vif: float(v) / 10.0,   "°C"),
     0x5E: ("return_temperature",  lambda v, vif: float(v) / 10.0,   "°C"),
     0x61: ("delta_temperature",   lambda v, vif: float(v) / 100.0,  "K"),
-    0x6D: ("timestamp",           lambda v, vif: _ts(v),            None),
+    0x6D: ("time_point",          lambda v, vif: _ts(v),            None),
     0x78: ("serial_number",       lambda v, vif: str(int(v)).zfill(8), None),
     # You can add more VIFs here if the meter exposes them.
 }
@@ -303,10 +303,11 @@ def print_human(parsed, show_generic=False, compute_power=True):
     for k in preferred_order:
         if k in values:
             v, u = values[k]
+            unit = (u or "").strip()
             if isinstance(v, float) and u in ("kWh","m³","m³/h","°C","K","kW"):
-                print(f"  {k}: {v:.3f} {u}".rstrip())
+                print(f"  {k}: {v:.3f}{(' ' + unit) if unit else ''}".rstrip())
             else:
-                print(f"  {k}: {v} {u}".rstrip())
+                print(f"  {k}: {v}{(' ' + unit) if unit else ''}".rstrip())
 
     # Optional: generic fallback for unmapped records
     if show_generic:
