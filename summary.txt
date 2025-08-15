@@ -1,0 +1,66 @@
+Script function summary (for your prompt context)
+
+hexdump(b, width=16) → generator of text lines
+Formats raw bytes into hex + ASCII for debug printing.
+
+mbus_checksum_ok(frame) → bool
+Verifies long-frame checksum using the L excludes CS rule (68 L L 68 … CS 16).
+
+find_next_frame(buf) → (frame_bytes | None, remaining_bytes)
+Scans a byte buffer and extracts the next ACK/short/long M-Bus frame if present.
+
+decode_bcd_le(data) → int
+Decodes little-endian packed BCD (ignores 0xF nibbles) to an integer.
+
+man_code_from_word(w) → str
+Converts the 2-byte manufacturer field into a 3-letter code (e.g., ITR).
+
+parse_long_frame(fr) → dict
+Parses a valid long frame into:
+
+fixed: id (BCD), manufacturer, version, medium, access_no, status, signature.
+
+records: list of DIF/DIFE + VIF/VIFE + data items with raw bytes and a generic decoded value.
+
+as_human(record) → (name, value, unit) | None
+Maps common VIFs to named, unit-correct values, e.g.:
+
+0x78 → serial_number (BCD)
+
+0x06 → energy_total (kWh)
+
+0x10..0x17 → energy_total_J (J with scale)
+
+0x38..0x3F → volume_flow (m³/h with scale)
+
+0x58..0x5B → flow_temperature (°C), 0x5C..0x5F → return_temperature (°C)
+
+0x60..0x63 → delta_temperature (K)
+
+0x6D → timestamp (Type F; often epoch seconds)
+
+0xFD/VIFE 0x0E/0x0F → firmware_version / software_version
+Unrecognized records return None so they can be shown via the generic dump. 
+m-bus.com
++1
+Gist
+Honeywell
+Pipersberg
+
+short_frame(ctrl, addr) → bytes
+Builds a short M-Bus frame (10 C A CS 16) to send control requests.
+
+send_wakeup_8N1(ser, debug=False) → None
+Sends ~2.2 s of 0x55 at 2400 8N1 to wake the IR head’s target.
+
+send_cmds_8E1(ser, addr, debug=False) → None
+Switches to 2400 8E1 and sends SND_NKE then REQ_UD2 to the given address (default broadcast 0xFE).
+
+read_window(ser, window_s, debug=False, save_fh=None) → bytes
+Reads and returns all bytes received during window_s seconds (optionally dumps/saves chunks).
+
+print_human(parsed, also_dump_generic=False) → prints
+Prints a one-line meter header and a sorted list of named values with units. Optionally appends a generic record dump.
+
+main() → runs the loop
+Opens the serial port, repeatedly: wake → request → read window → parse frames → print human values; supports --addr, --sniff, --debug, --save.
