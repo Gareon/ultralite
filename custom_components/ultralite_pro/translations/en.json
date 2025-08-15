@@ -1,0 +1,80 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "UltraLite PRO Energy Meter",
+        "description": "Configure your UltraLite PRO energy meter connection.",
+        "data": {
+          "usb_path": "USB Device Path",
+          "update_interval": "Update Interval (seconds)",
+          "primary_address": "Primary Address"
+        },
+        "data_description": {
+          "usb_path": "Path to the USB IR device (e.g., /dev/ttyUSB0)",
+          "update_interval": "How often to poll the meter (10-3600 seconds, 0 to disable)",
+          "primary_address": "M-Bus primary address (hex format like 0xFE or decimal)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the meter",
+      "usb_device_not_found": "USB device not found at the specified path",
+      "permission_denied": "Permission denied accessing USB device",
+      "target_device_not_responding": "Target device not responding",
+      "invalid_address": "Invalid primary address format",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "energy_total": {
+        "name": "Total Energy"
+      },
+      "volume_total": {
+        "name": "Total Volume"
+      },
+      "volume_flow": {
+        "name": "Volume Flow Rate"
+      },
+      "flow_temperature": {
+        "name": "Flow Temperature"
+      },
+      "return_temperature": {
+        "name": "Return Temperature"
+      },
+      "delta_temperature": {
+        "name": "Temperature Difference"
+      },
+      "thermal_power": {
+        "name": "Thermal Power"
+      },
+      "operating_time_days": {
+        "name": "Operating Time"
+      },
+      "serial_number": {
+        "name": "Serial Number"
+      },
+      "firmware_version": {
+        "name": "Firmware Version"
+      },
+      "software_version": {
+        "name": "Software Version"
+      }
+    }
+  },
+  "services": {
+    "update_sensors": {
+      "name": "Update Sensors",
+      "description": "Manually update sensor values from the meter.",
+      "fields": {
+        "device_id": {
+          "name": "Device ID",
+          "description": "Device ID to update (optional, updates all devices if not specified)"
+        }
+      }
+    }
+  }
+}
