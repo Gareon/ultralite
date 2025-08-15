@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
-# read_ultralite_human.py — Itron/Integral-V style M-Bus readout with human-readable values
-# - wakeup 0x55 @ 2400 8N1, then SND_NKE + REQ_UD2 @ 2400 8E1
-# - parses long frame and maps the common VIFs we see on these meters
-# - loops forever so you can tune the IR head (Ctrl-C to stop)
+# read_ultralite_vifmap.py
+# PySerial M-Bus reader for Itron / Integral-V UltraLite PRO (IR head on /dev/ttyUSBx)
+# - Wakeup: 0x55 @ 2400 8N1
+# - Request: SND_NKE + REQ_UD2 @ 2400 8E1
+# - Parses long frames and prints human-readable values using VIF_MAP
+#
+# Notes for this meter profile (based on your captures):
+#   * VIF 0x06  -> cumulative energy in kWh (unsigned)
+#   * VIF 0x14  -> cumulative volume with 0.01 m³ resolution (BCD)
+#   * VIF 0x38..0x3F -> volume flow, scale 10^(n-6) m³/h (n=VIF&7). For 0x3B: /1000.
+#   * VIF 0x5A -> flow temp (°C, 0.1 steps); 0x5E -> return temp (°C, 0.1 steps)
+#   * VIF 0x61 -> ΔT (K, 0.01 steps)
+#   * VIF 0x6D -> time point (epoch seconds -> ISO-8601, vendor-profile)
+#   * VIF 0x78 -> serial/fabrication number (BCD, 8 digits)
+#   * VIF 0x27 -> interpreted here as operating time (days) per field use seen (16-bit int)
+#   * VIF 0xFD + VIFE 0x0E/0x0F -> firmware/software versions (uint8)
+#
+# Derivations:
+#   * thermal_power_kW = 1.163 * volume_flow(m³/h) * delta_temperature(K)
 
-import sys, time, struct, argparse, datetime
+import sys, time, argparse, datetime, struct
 import serial
 
+# ------------ Debug helpers ------------
 def hexdump(b: bytes, width=16):
     for i in range(0, len(b), width):
         chunk = b[i:i+width]
@@ -14,13 +30,14 @@ def hexdump(b: bytes, width=16):
         ascii_ = "".join(chr(x) if 32 <= x <= 126 else "." for x in chunk)
         yield f"{hexs:<{width*3}} |{ascii_}|"
 
-# ---------- M-Bus framing (L excludes CS) ----------
+# ------------ M-Bus framing (L excludes CS) ------------
 def mbus_checksum_ok(fr: bytes) -> bool:
+    # Long frame: 68 L L 68 C A CI [DATA ...] CS 16
     if len(fr) < 9 or fr[0] != 0x68 or fr[3] != 0x68 or fr[-1] != 0x16:
         return False
     L = fr[1]
     if fr[2] != L: return False
-    if len(fr) != 6 + L:  # 68 L L 68 + L (C,A,CI,DATA) + CS + 16
+    if len(fr) != 6 + L:  # 68 L L 68 + L bytes (C,A,CI,DATA) + CS + 16
         return False
     CS = fr[4 + L]
     return (sum(fr[4:4+L]) & 0xFF) == CS
@@ -31,7 +48,7 @@ def find_next_frame(buf: bytes):
         b = buf[i]
         if b == 0xE5:  # ACK
             return buf[i:i+1], buf[i+1:]
-        if b == 0x10 and i + 5 <= n:  # short
+        if b == 0x10 and i + 5 <= n:  # short: 10 C A CS 16
             fr = buf[i:i+5]
             if fr[-1] == 0x16 and ((fr[1] + fr[2]) & 0xFF) == fr[3]:
                 return fr, buf[i+5:]
@@ -44,8 +61,9 @@ def find_next_frame(buf: bytes):
         i += 1
     return None, buf
 
-# ---------- little helpers ----------
+# ------------ Basic decoders ------------
 def decode_bcd_le(data: bytes) -> int:
+    """Little-endian packed BCD -> int (ignores 0xF nibbles)."""
     digits = []
     for x in data:
         lo, hi = x & 0x0F, (x >> 4) & 0x0F
@@ -59,11 +77,11 @@ def man_code_from_word(w: int) -> str:
     c3 = (w & 0x1F) + 64
     return "".join(chr(c) if 65 <= c <= 90 else '?' for c in (c1, c2, c3))
 
-# ---------- parse long frame ----------
+# ------------ Parse long frame to generic records ------------
 def parse_long_frame(fr: bytes):
     L = fr[1]
     C, A, CI = fr[4], fr[5], fr[6]
-    data = fr[7:7+(L-3)]  # remove C,A,CI (3 bytes); L excludes CS
+    data = fr[7:7 + (L - 3)]  # strip C,A,CI (3 bytes), L excludes CS
     fixed, recs_bytes = {}, data
     if len(data) >= 12:
         fixed = {
@@ -83,15 +101,17 @@ def parse_long_frame(fr: bytes):
         start = i
         if i >= len(recs_bytes): break
         DIF = recs_bytes[i]; i += 1
-        if DIF in (0x0F, 0x1F, 0x2F):
+        if DIF in (0x0F, 0x1F, 0x2F):  # special/fill
             recs.append({"ofs": start, "special": hex(DIF)})
             continue
+        # DIFE chain
         difes = []
         while (DIF & 0x80) and i < len(recs_bytes):
             d = recs_bytes[i]; i += 1
             difes.append(d)
             if not (d & 0x80): break
         if i >= len(recs_bytes): break
+        # VIF + VIFE(s)
         VIF = recs_bytes[i]; i += 1
         vifes = []
         while (VIF & 0x80) and i < len(recs_bytes):
@@ -99,106 +119,105 @@ def parse_long_frame(fr: bytes):
             vifes.append(v)
             if not (v & 0x80): break
 
+        # Data length/type (DIF low nibble)
         dl = DIF & 0x0F
         raw, value = b"", None
-        if dl in (0x1,0x2,0x3,0x4,0x6,0x7):
+        if dl in (0x1,0x2,0x3,0x4,0x6,0x7):  # unsigned ints 8/16/24/32/48/64
             size = {1:1,2:2,3:3,4:4,6:6,7:8}[dl]
             if i + size <= len(recs_bytes):
                 raw = recs_bytes[i:i+size]; i += size
                 value = int.from_bytes(raw, "little")
-        elif dl == 0x5:
+        elif dl == 0x5:  # 32-bit float
             if i + 4 <= len(recs_bytes):
                 raw = recs_bytes[i:i+4]; i += 4
                 value = struct.unpack("<f", raw)[0]
-        elif dl in (0x9,0xA,0xB,0xC,0xE):
+        elif dl in (0x9,0xA,0xB,0xC,0xE):  # BCD 2/4/6/8/12-digit
             size = {0x9:1,0xA:2,0xB:3,0xC:4,0xE:6}[dl]
             if i + size <= len(recs_bytes):
                 raw = recs_bytes[i:i+size]; i += size
                 value = decode_bcd_le(raw)
-        elif dl == 0xD:
+        elif dl == 0xD:  # variable-length (LVAR)
             if i < len(recs_bytes):
                 LVAR = recs_bytes[i]; i += 1
                 if i + LVAR <= len(recs_bytes):
                     raw = recs_bytes[i:i+LVAR]; i += LVAR
-                    value = raw
-        recs.append({
-            "ofs": start,
-            "DIF": DIF, "VIF": VIF,
-            "DIFEs": difes, "VIFEs": vifes,
-            "raw": raw, "value": value,
-        })
+                    value = raw  # keep bytes
+        recs.append({"ofs": start, "DIF": DIF, "VIF": VIF, "DIFEs": difes, "VIFEs": vifes,
+                     "raw": raw, "value": value})
     return {"ctrl": C, "addr": A, "ci": CI, "fixed": fixed, "records": recs}
 
-# ---------- VIF → human mapper (just the ones we saw) ----------
-def as_human(r):
-    VIF = r["VIF"]; VIFEs = r["VIFEs"]; val = r["value"]; raw = r["raw"]
-    name, unit, shown = None, None, None
+# ------------ VIF → human mapping ------------
+def _ts(secs):
+    try:
+        return datetime.datetime.utcfromtimestamp(int(secs)).isoformat() + "Z"
+    except Exception:
+        return None
 
-    # Serial / fabrication number (0x78, 8-digit BCD)
-    if VIF == 0x78 and isinstance(val, int):
-        return ("serial_number", str(val), "")
+def _volume_scaled(vif, val_int):
+    """Volume family 0x20..0x27: m³ * 10^(n-6) where n=vif&7."""
+    n = vif & 0x07
+    return float(val_int) * (10 ** (n - 6))
 
-    # Energy (1 kWh) — VIF 0x06 (per EN 13757-3 + vendor docs)
-    if VIF == 0x06 and isinstance(val, int):
-        return ("energy_total", float(val), "kWh")
+VIF_MAP = {
+    0x06: ("energy_total",        lambda v, vif: float(v),          "kWh"),
+    0x14: ("volume_total",        lambda v, vif: float(v) / 100.0,  "m³"),    # 0.01 m³ (BCD)
+    0x27: ("operating_time_days", lambda v, vif: int(v),            "days"),  # seen in your frames
+    0x38: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x39: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x3A: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x3B: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x3C: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x3D: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x3E: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x3F: ("volume_flow",         lambda v, vif: _volume_scaled(vif, v), "m³/h"),
+    0x5A: ("flow_temperature",    lambda v, vif: float(v) / 10.0,   "°C"),
+    0x5E: ("return_temperature",  lambda v, vif: float(v) / 10.0,   "°C"),
+    0x61: ("delta_temperature",   lambda v, vif: float(v) / 100.0,  "K"),
+    0x6D: ("timestamp",           lambda v, vif: _ts(v),            None),
+    0x78: ("serial_number",       lambda v, vif: str(int(v)).zfill(8), None),
+    # You can add more VIFs here if the meter exposes them.
+}
 
-    # Energy in joules 10^n — 0x10..0x17 (we only saw 0x14)
-    if 0x10 <= VIF <= 0x17 and isinstance(val, int):
-        n = VIF & 0x07  # nnn
-        joule = float(val) * (10 ** n)
-        return ("energy_total_J", joule, "J")
+# VIF=0xFD (extension) → map by first VIFE (masked to 7-bit)
+VIF_EXT_MAP = {
+    0x0E: ("firmware_version", lambda v: int(v), None),
+    0x0F: ("software_version", lambda v: int(v), None),
+    0x08: ("access_number",    lambda v: int(v), None),
+    0x09: ("medium_code",      lambda v: int(v), None),
+    # extend as needed
+}
 
-    # Volume (10^(n-6) m³): 0x20..0x27 (e.g. 0x27 = 10 m³ units)
-    if 0x20 <= VIF <= 0x27 and isinstance(val, int):
-        n = VIF & 0x07
-        m3 = float(val) * (10 ** (n - 6))
-        return ("volume_total", m3, "m³")
+def record_to_human(r):
+    """Return (key, value, unit) or None if not mapped."""
+    if "special" in r or r["value"] is None:
+        return None
+    VIF = r["VIF"]
+    val = r["value"]
 
-    # Volume flow (10^(n-6) m³/h): 0x38..0x3F (e.g. 0x3B = 1 L/h)
-    if 0x38 <= VIF <= 0x3F and isinstance(val, int):
-        n = VIF & 0x07
-        m3h = float(val) * (10 ** (n - 6))
-        # also provide L/h if small
-        return ("volume_flow", m3h, "m³/h")
+    # Extension VIF (0xFD)
+    if VIF == 0xFD and r["VIFEs"]:
+        vife = r["VIFEs"][0] & 0x7F  # first non-ext VIFE
+        if vife in VIF_EXT_MAP:
+            name, fn, unit = VIF_EXT_MAP[vife]
+            return (name, fn(val), unit)
+        return None
 
-    # Flow / Return temperature (°C), step 10^(nn-3): 0x58..0x5B / 0x5C..0x5F
-    if 0x58 <= VIF <= 0x5B and isinstance(val, int):
-        nn = VIF & 0x03
-        return ("flow_temperature", float(val) * (10 ** (nn - 3)), "°C")
-    if 0x5C <= VIF <= 0x5F and isinstance(val, int):
-        nn = VIF & 0x03
-        return ("return_temperature", float(val) * (10 ** (nn - 3)), "°C")
-
-    # Temperature difference (K): 0x60..0x63 (we saw 0x61 -> 0.01 K)
-    if 0x60 <= VIF <= 0x63 and isinstance(val, int):
-        nn = VIF & 0x03
-        return ("delta_temperature", float(val) * (10 ** (nn - 3)), "K")
-
-    # Time point (date/time) Type F — 0x6D (many meters use Unix epoch seconds)
-    if VIF == 0x6D and isinstance(val, int):
+    # Direct map
+    if VIF in VIF_MAP:
+        name, fn, unit = VIF_MAP[VIF]
         try:
-            dt = datetime.datetime.utcfromtimestamp(val).isoformat() + "Z"
-            return ("timestamp", dt, "")
-        except Exception:
-            return ("timestamp_raw", val, "")
+            return (name, fn(val, VIF), unit)
+        except TypeError:
+            # backward compat if lambda v (no vif arg)
+            return (name, fn(val), unit)
 
-    # Extensions with VIF = 0xFD (linear extension) — a few handy ones
-    if VIF == 0xFD and VIFEs:
-        ext = VIFEs[0] & 0x7F  # first VIFE without ext-bit
-        if ext == 0x0E and isinstance(val, int):
-            return ("firmware_version", int(val), "")
-        if ext == 0x0F and isinstance(val, int):
-            return ("software_version", int(val), "")
-        if ext == 0x08 and isinstance(val, int):
-            return ("access_number", int(val), "")
-        if ext == 0x09 and isinstance(val, int):
-            return ("medium_code", int(val), "")
-        if ext == 0x0A and isinstance(val, int):
-            return ("manufacturer_code", int(val), "")
+    # Generic volume family 0x20..0x27 if you want to surface others:
+    if 0x20 <= VIF <= 0x27 and isinstance(val, int):
+        return ("volume_scaled", _volume_scaled(VIF, val), "m³")
 
-    return None  # unknown/leave generic
+    return None
 
-# ---------- serial I/O + loop ----------
+# ------------ Serial + loop ------------
 def short_frame(ctrl, addr):
     return bytes([0x10, ctrl, addr, (ctrl + addr) & 0xFF, 0x16])
 
@@ -244,50 +263,75 @@ def read_window(ser, window_s, debug=False, save_fh=None):
                 for line in hexdump(part): print("   ", line)
     return bytes(buf)
 
-def print_human(parsed, also_dump_generic=False):
+def print_human(parsed, show_generic=False, compute_power=True):
     f = parsed.get("fixed", {})
     if f:
-        print(f"Meter: ID={f['id']}  Man={f['manufacturer']}  Ver={f['version']}  Medium=0x{f['medium']:02X}  AccessNo={f['access_no']}  Status=0x{f['status']:02X}")
-    # Collect mapped values
-    mapped = []
+        print(f"Meter: ID={f['id']}  Man={f['manufacturer']}  Ver={f['version']}  "
+              f"Medium=0x{f['medium']:02X}  AccessNo={f['access_no']}  Status=0x{f['status']:02X}")
+
+    # Map known records
+    values = {}
     for r in parsed["records"]:
-        if "special" in r: continue
-        m = as_human(r)
+        m = record_to_human(r)
         if m:
-            mapped.append(m)
-    # De-duplicate by key (keep last)
-    out = {}
-    for k, v, u in mapped:
-        out[k] = (v, u)
+            k, v, u = m
+            values[k] = (v, u)  # keep last occurrence
+
+    # Derived: thermal power (kW) if we have flow & delta_T
+    if compute_power and ("volume_flow" in values) and ("delta_temperature" in values):
+        flow_m3h = float(values["volume_flow"][0])
+        dT = float(values["delta_temperature"][0])
+        power_kW = 1.163 * flow_m3h * dT
+        values["thermal_power"] = (power_kW, "kW")
+
     # Pretty print
     print("Values:")
-    for k in sorted(out.keys()):
-        v, u = out[k]
-        if isinstance(v, float) and (u in ("kWh","m³","m³/h","°C","K")):
-            print(f"  {k}: {v:.3f} {u}".rstrip())
-        else:
-            print(f"  {k}: {v} {u}".rstrip())
-    # Optional: generic fallback lines for unknowns
-    if also_dump_generic:
+    preferred_order = [
+        "serial_number",
+        "energy_total",
+        "volume_total",
+        "volume_flow",
+        "flow_temperature",
+        "return_temperature",
+        "delta_temperature",
+        "thermal_power",
+        "operating_time_days",
+        "firmware_version",
+        "software_version",
+        "timestamp",
+    ]
+    for k in preferred_order:
+        if k in values:
+            v, u = values[k]
+            if isinstance(v, float) and u in ("kWh","m³","m³/h","°C","K","kW"):
+                print(f"  {k}: {v:.3f} {u}".rstrip())
+            else:
+                print(f"  {k}: {v} {u}".rstrip())
+
+    # Optional: generic fallback for unmapped records
+    if show_generic:
         print("\n(Decoded records, raw):")
         for r in parsed["records"]:
             if "special" in r:
-                print(f"  @+{r['ofs']:03d}: special {hex(r['DIF'])}"); continue
-            raw_hex = r['raw'].hex() if isinstance(r['raw'], (bytes,bytearray)) else (r['raw'] or b"").hex()
-            val = r['value']
+                print(f"  @+{r['ofs']:03d}: special {r['special']}")
+                continue
+            val = r["value"]
             if isinstance(val, bytes): val = val.hex()
-            print(f"  @+{r['ofs']:03d}: DIF=0x{r['DIF']:x} VIF=0x{r['VIF']:x} VIFEs={[hex(x) for x in r['VIFEs']]} value={val} raw={raw_hex}")
+            raw_hex = r["raw"].hex() if isinstance(r["raw"], (bytes, bytearray)) else ""
+            difes = [hex(x) for x in r["DIFEs"]]
+            vifes = [hex(x) for x in r["VIFEs"]]
+            print(f"  @+{r['ofs']:03d}: DIF=0x{r['DIF']:x} VIF=0x{r['VIF']:x} DIFEs={difes} VIFEs={vifes} value={val} raw={raw_hex}")
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("port", nargs="?", default="/dev/ttyUSB0")
-    ap.add_argument("--addr", default="0xFE")
-    ap.add_argument("--window", type=float, default=2.5)
-    ap.add_argument("--cycle", type=float, default=0.5)
-    ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--save")
-    ap.add_argument("--sniff", action="store_true")
-    ap.add_argument("--show-generic", action="store_true")
+    ap.add_argument("--addr", default="0xFE", help="primary address (e.g., 0xFE, 0x00)")
+    ap.add_argument("--window", type=float, default=2.5, help="read window per cycle (s)")
+    ap.add_argument("--cycle", type=float, default=0.5, help="pause between cycles (s)")
+    ap.add_argument("--debug", action="store_true", help="print raw RX hexdumps")
+    ap.add_argument("--save", help="save raw RX bytes to file")
+    ap.add_argument("--sniff", action="store_true", help="listen only (no requests), 2400 8E1")
+    ap.add_argument("--show-generic", action="store_true", help="also print generic undecoded records")
     args = ap.parse_args()
 
     addr = int(args.addr, 0)
@@ -310,15 +354,15 @@ def main():
                     ser.timeout  = 0.15
 
                 buf = read_window(ser, args.window, debug=args.debug, save_fh=save_fh)
-                work = buf
                 any_frame = False
+                work = buf
                 while True:
                     fr, work = find_next_frame(work)
                     if not fr: break
                     if fr[0] == 0x68 and mbus_checksum_ok(fr):
                         any_frame = True
                         parsed = parse_long_frame(fr)
-                        print_human(parsed, also_dump_generic=args.show_generic)
+                        print_human(parsed, show_generic=args.show_generic)
                 if not any_frame:
                     print(".", end="", flush=True)
                 time.sleep(args.cycle)

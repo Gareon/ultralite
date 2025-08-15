@@ -1,66 +1,88 @@
-Script function summary (for your prompt context)
+hexdump(b, width=16) → generator of lines
+Formats raw bytes as hex + ASCII for debug logs.
 
-hexdump(b, width=16) → generator of text lines
-Formats raw bytes into hex + ASCII for debug printing.
+mbus_checksum_ok(frame: bytes) -> bool
+Validates M-Bus long frame checksum using the “L excludes CS” rule: 68 L L 68 C A CI [DATA] CS 16. 
+m-bus.com
 
-mbus_checksum_ok(frame) → bool
-Verifies long-frame checksum using the L excludes CS rule (68 L L 68 … CS 16).
+find_next_frame(buf: bytes) -> (frame|None, remaining)
+Scans a buffer and extracts the next ACK (E5), short (10 … 16), or valid long (68 … 16) frame.
 
-find_next_frame(buf) → (frame_bytes | None, remaining_bytes)
-Scans a byte buffer and extracts the next ACK/short/long M-Bus frame if present.
+decode_bcd_le(data: bytes) -> int
+Decodes little-endian packed BCD (ignores 0xF nibbles).
 
-decode_bcd_le(data) → int
-Decodes little-endian packed BCD (ignores 0xF nibbles) to an integer.
-
-man_code_from_word(w) → str
+man_code_from_word(w: int) -> str
 Converts the 2-byte manufacturer field into a 3-letter code (e.g., ITR).
 
-parse_long_frame(fr) → dict
+parse_long_frame(fr: bytes) -> dict
 Parses a valid long frame into:
 
-fixed: id (BCD), manufacturer, version, medium, access_no, status, signature.
+fixed: { id (BCD), manufacturer, version, medium, access_no, status, signature }
 
-records: list of DIF/DIFE + VIF/VIFE + data items with raw bytes and a generic decoded value.
+records: list of generic items { ofs, DIF, DIFEs, VIF, VIFEs, raw, value }, where value is a basic int/float/BCD decode (no units yet).
 
-as_human(record) → (name, value, unit) | None
-Maps common VIFs to named, unit-correct values, e.g.:
-
-0x78 → serial_number (BCD)
+VIF_MAP (core application mapping)
+Maps known VIF codes → (name, convert, unit) to produce named, unit-correct values:
 
 0x06 → energy_total (kWh)
 
-0x10..0x17 → energy_total_J (J with scale)
+0x14 → volume_total (m³, 0.01 m³ resolution)
 
-0x38..0x3F → volume_flow (m³/h with scale)
+0x38..0x3F → volume_flow (m³/h, scale 10^(n−6))
 
-0x58..0x5B → flow_temperature (°C), 0x5C..0x5F → return_temperature (°C)
+0x5A → flow_temperature (°C, /10)
 
-0x60..0x63 → delta_temperature (K)
+0x5E → return_temperature (°C, /10)
 
-0x6D → timestamp (Type F; often epoch seconds)
+0x61 → delta_temperature (K, /100)
 
-0xFD/VIFE 0x0E/0x0F → firmware_version / software_version
-Unrecognized records return None so they can be shown via the generic dump. 
+0x6D → timestamp (epoch seconds → ISO-8601; vendor-specific “time point”)
+
+0x78 → serial_number (fabrication number, BCD)
+
+0x27 → operating_time_days (days)
+Unmapped items fall back to a generic “volume_scaled” path for the 0x20..0x27 family if enabled. 
+2Flow AB
+molline.de
 m-bus.com
-+1
-Gist
-Honeywell
-Pipersberg
 
-short_frame(ctrl, addr) → bytes
-Builds a short M-Bus frame (10 C A CS 16) to send control requests.
+VIF_EXT_MAP (extensions for VIF = 0xFD)
+Maps VIFE codes (first extension, 7-bit) → named items:
 
-send_wakeup_8N1(ser, debug=False) → None
-Sends ~2.2 s of 0x55 at 2400 8N1 to wake the IR head’s target.
+0x0E → firmware_version
 
-send_cmds_8E1(ser, addr, debug=False) → None
-Switches to 2400 8E1 and sends SND_NKE then REQ_UD2 to the given address (default broadcast 0xFE).
+0x0F → software_version
 
-read_window(ser, window_s, debug=False, save_fh=None) → bytes
-Reads and returns all bytes received during window_s seconds (optionally dumps/saves chunks).
+0x08 → access_number
 
-print_human(parsed, also_dump_generic=False) → prints
-Prints a one-line meter header and a sorted list of named values with units. Optionally appends a generic record dump.
+0x09 → medium_code
+(Extended VIF behavior per spec: when VIF == 0xFD/0xFB, the “true” VIF is in the first VIFE.) 
+m-bus.com
 
-main() → runs the loop
-Opens the serial port, repeatedly: wake → request → read window → parse frames → print human values; supports --addr, --sniff, --debug, --save.
+record_to_human(record) -> (key, value, unit) | None
+Applies VIF_MAP/VIF_EXT_MAP to a single parsed record and returns a typed, unit-correct tuple (or None if unknown).
+
+short_frame(ctrl, addr) -> bytes
+Builds a control short frame (10 C A CS 16) for SND_NKE / REQ_UD2.
+
+send_wakeup_8N1(ser, debug=False)
+Sends ~2.2 s of 0x55 at 2400 8N1 to wake the meter’s IR head (drains port, small pause).
+
+send_cmds_8E1(ser, addr, debug=False)
+Switches to 2400 8E1; sends SND_NKE then REQ_UD2 (default address 0xFE broadcast).
+
+read_window(ser, window_s, debug=False, save_fh=None) -> bytes
+Collects all RX bytes during a time window (optionally hexdumps/saves).
+
+print_human(parsed, show_generic=False, compute_power=True)
+Prints a single structured block:
+
+Meter header from fixed
+
+“Values:” list from mapped items (sorted by a preferred order; suppresses units when empty)
+
+Optionally the raw generic record list
+If both volume_flow and delta_temperature are present, it also computes thermal_power in kW using 1.163 × m³/h × K (ρ≈1 kg/L, c≈4.186 kJ/kgK).
+
+main()
+Opens the serial port and loops: wake → request → read → parse → print (or --sniff to just listen). CLI options: --addr, --window, --cycle, --debug, --save, --show-generic.
