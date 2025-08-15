@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-# read_ultralite_dump.py (fixed L/CS handling)
-# Usage: python3 read_ultralite_dump.py /dev/ttyUSB0 --debug
+# read_ultralite_human.py — Itron/Integral-V style M-Bus readout with human-readable values
+# - wakeup 0x55 @ 2400 8N1, then SND_NKE + REQ_UD2 @ 2400 8E1
+# - parses long frame and maps the common VIFs we see on these meters
+# - loops forever so you can tune the IR head (Ctrl-C to stop)
 
 import sys, time, struct, argparse, datetime
 import serial
@@ -12,19 +14,16 @@ def hexdump(b: bytes, width=16):
         ascii_ = "".join(chr(x) if 32 <= x <= 126 else "." for x in chunk)
         yield f"{hexs:<{width*3}} |{ascii_}|"
 
-# --------- M-Bus helpers (L excludes CS) ----------
+# ---------- M-Bus framing (L excludes CS) ----------
 def mbus_checksum_ok(fr: bytes) -> bool:
-    # Long frame: 68 L L 68 C A CI [DATA ...] CS 16
-    # Here: L counts C,A,CI and DATA only (NOT CS).
     if len(fr) < 9 or fr[0] != 0x68 or fr[3] != 0x68 or fr[-1] != 0x16:
         return False
     L = fr[1]
     if fr[2] != L: return False
-    if len(fr) != 6 + L:   # 68 L L 68  + L-bytes (C,A,CI,DATA) + CS + 16  => 6 + L
+    if len(fr) != 6 + L:  # 68 L L 68 + L (C,A,CI,DATA) + CS + 16
         return False
-    CS = fr[4 + L]         # checksum byte sits right after those L bytes
-    calc = sum(fr[4:4 + L]) & 0xFF
-    return calc == CS
+    CS = fr[4 + L]
+    return (sum(fr[4:4+L]) & 0xFF) == CS
 
 def find_next_frame(buf: bytes):
     i, n = 0, len(buf)
@@ -32,19 +31,20 @@ def find_next_frame(buf: bytes):
         b = buf[i]
         if b == 0xE5:  # ACK
             return buf[i:i+1], buf[i+1:]
-        if b == 0x10 and i + 5 <= n:  # short: 10 C A CS 16
+        if b == 0x10 and i + 5 <= n:  # short
             fr = buf[i:i+5]
             if fr[-1] == 0x16 and ((fr[1] + fr[2]) & 0xFF) == fr[3]:
                 return fr, buf[i+5:]
         if b == 0x68 and i + 6 <= n:
             L = buf[i+1]
             if i + 6 + L <= n and buf[i+2] == L and buf[i+3] == 0x68:
-                fr = buf[i:i + 6 + L]
+                fr = buf[i:i+6+L]
                 if fr[-1] == 0x16 and mbus_checksum_ok(fr):
-                    return fr, buf[i + 6 + L:]
+                    return fr, buf[i+6+L:]
         i += 1
     return None, buf
 
+# ---------- little helpers ----------
 def decode_bcd_le(data: bytes) -> int:
     digits = []
     for x in data:
@@ -59,11 +59,11 @@ def man_code_from_word(w: int) -> str:
     c3 = (w & 0x1F) + 64
     return "".join(chr(c) if 65 <= c <= 90 else '?' for c in (c1, c2, c3))
 
+# ---------- parse long frame ----------
 def parse_long_frame(fr: bytes):
     L = fr[1]
     C, A, CI = fr[4], fr[5], fr[6]
-    data = fr[7:7 + (L - 3)]   # L excludes CS; remove C,A,CI (3 bytes)
-
+    data = fr[7:7+(L-3)]  # remove C,A,CI (3 bytes); L excludes CS
     fixed, recs_bytes = {}, data
     if len(data) >= 12:
         fixed = {
@@ -77,11 +77,11 @@ def parse_long_frame(fr: bytes):
         }
         recs_bytes = data[12:]
 
-    # Generic records: DIF[/DIFE...] VIF[/VIFE...] DATA
     recs = []
     i = 0
     while i < len(recs_bytes):
         start = i
+        if i >= len(recs_bytes): break
         DIF = recs_bytes[i]; i += 1
         if DIF in (0x0F, 0x1F, 0x2F):
             recs.append({"ofs": start, "special": hex(DIF)})
@@ -123,16 +123,84 @@ def parse_long_frame(fr: bytes):
                     value = raw
         recs.append({
             "ofs": start,
-            "DIF": hex(DIF), "VIF": hex(VIF),
-            "DIFEs": [hex(x) for x in difes], "VIFEs": [hex(x) for x in vifes],
-            "raw": raw.hex(), "value": value,
+            "DIF": DIF, "VIF": VIF,
+            "DIFEs": difes, "VIFEs": vifes,
+            "raw": raw, "value": value,
         })
     return {"ctrl": C, "addr": A, "ci": CI, "fixed": fixed, "records": recs}
 
-# --------- serial I/O + loop ----------
+# ---------- VIF → human mapper (just the ones we saw) ----------
+def as_human(r):
+    VIF = r["VIF"]; VIFEs = r["VIFEs"]; val = r["value"]; raw = r["raw"]
+    name, unit, shown = None, None, None
+
+    # Serial / fabrication number (0x78, 8-digit BCD)
+    if VIF == 0x78 and isinstance(val, int):
+        return ("serial_number", str(val), "")
+
+    # Energy (1 kWh) — VIF 0x06 (per EN 13757-3 + vendor docs)
+    if VIF == 0x06 and isinstance(val, int):
+        return ("energy_total", float(val), "kWh")
+
+    # Energy in joules 10^n — 0x10..0x17 (we only saw 0x14)
+    if 0x10 <= VIF <= 0x17 and isinstance(val, int):
+        n = VIF & 0x07  # nnn
+        joule = float(val) * (10 ** n)
+        return ("energy_total_J", joule, "J")
+
+    # Volume (10^(n-6) m³): 0x20..0x27 (e.g. 0x27 = 10 m³ units)
+    if 0x20 <= VIF <= 0x27 and isinstance(val, int):
+        n = VIF & 0x07
+        m3 = float(val) * (10 ** (n - 6))
+        return ("volume_total", m3, "m³")
+
+    # Volume flow (10^(n-6) m³/h): 0x38..0x3F (e.g. 0x3B = 1 L/h)
+    if 0x38 <= VIF <= 0x3F and isinstance(val, int):
+        n = VIF & 0x07
+        m3h = float(val) * (10 ** (n - 6))
+        # also provide L/h if small
+        return ("volume_flow", m3h, "m³/h")
+
+    # Flow / Return temperature (°C), step 10^(nn-3): 0x58..0x5B / 0x5C..0x5F
+    if 0x58 <= VIF <= 0x5B and isinstance(val, int):
+        nn = VIF & 0x03
+        return ("flow_temperature", float(val) * (10 ** (nn - 3)), "°C")
+    if 0x5C <= VIF <= 0x5F and isinstance(val, int):
+        nn = VIF & 0x03
+        return ("return_temperature", float(val) * (10 ** (nn - 3)), "°C")
+
+    # Temperature difference (K): 0x60..0x63 (we saw 0x61 -> 0.01 K)
+    if 0x60 <= VIF <= 0x63 and isinstance(val, int):
+        nn = VIF & 0x03
+        return ("delta_temperature", float(val) * (10 ** (nn - 3)), "K")
+
+    # Time point (date/time) Type F — 0x6D (many meters use Unix epoch seconds)
+    if VIF == 0x6D and isinstance(val, int):
+        try:
+            dt = datetime.datetime.utcfromtimestamp(val).isoformat() + "Z"
+            return ("timestamp", dt, "")
+        except Exception:
+            return ("timestamp_raw", val, "")
+
+    # Extensions with VIF = 0xFD (linear extension) — a few handy ones
+    if VIF == 0xFD and VIFEs:
+        ext = VIFEs[0] & 0x7F  # first VIFE without ext-bit
+        if ext == 0x0E and isinstance(val, int):
+            return ("firmware_version", int(val), "")
+        if ext == 0x0F and isinstance(val, int):
+            return ("software_version", int(val), "")
+        if ext == 0x08 and isinstance(val, int):
+            return ("access_number", int(val), "")
+        if ext == 0x09 and isinstance(val, int):
+            return ("medium_code", int(val), "")
+        if ext == 0x0A and isinstance(val, int):
+            return ("manufacturer_code", int(val), "")
+
+    return None  # unknown/leave generic
+
+# ---------- serial I/O + loop ----------
 def short_frame(ctrl, addr):
-    cs = (ctrl + addr) & 0xFF
-    return bytes([0x10, ctrl, addr, cs, 0x16])
+    return bytes([0x10, ctrl, addr, (ctrl + addr) & 0xFF, 0x16])
 
 def send_wakeup_8N1(ser, debug=False):
     ser.baudrate = 2400
@@ -176,36 +244,39 @@ def read_window(ser, window_s, debug=False, save_fh=None):
                 for line in hexdump(part): print("   ", line)
     return bytes(buf)
 
-def print_frames_from(buf):
-    work = buf
-    any_frame = False
-    while True:
-        fr, work = find_next_frame(work)
-        if not fr: break
-        any_frame = True
-        if len(fr) == 1 and fr[0] == 0xE5:
-            print("[FRAME] ACK E5"); continue
-        if fr[0] == 0x10 and len(fr) == 5:
-            print(f"[FRAME] SHORT: {fr.hex(' ')}"); continue
-        if fr[0] == 0x68:
-            ok = mbus_checksum_ok(fr)
-            print(f"[FRAME] LONG ({'OK' if ok else 'BAD-CS'}), {len(fr)} bytes")
-            print("        ", fr.hex(" "))
-            if ok:
-                p = parse_long_frame(fr)
-                f = p.get("fixed", {})
-                if f:
-                    print(f"        ID={f['id']} Man={f['manufacturer']} Ver={f['version']} "
-                          f"Med=0x{f['medium']:02X} Acc={f['access_no']} Sta=0x{f['status']:02X}")
-                print("        Records:")
-                for r in p["records"]:
-                    if "special" in r:
-                        print(f"          @+{r['ofs']:03d}: special {r['special']}"); continue
-                    val = r['value']
-                    if isinstance(val, bytes): val = val.hex()
-                    print(f"          @+{r['ofs']:03d}: DIF={r['DIF']} VIF={r['VIF']} "
-                          f"DIFEs={r.get('DIFEs', [])} VIFEs={r.get('VIFEs', [])} raw={r['raw']} value={val}")
-    return any_frame
+def print_human(parsed, also_dump_generic=False):
+    f = parsed.get("fixed", {})
+    if f:
+        print(f"Meter: ID={f['id']}  Man={f['manufacturer']}  Ver={f['version']}  Medium=0x{f['medium']:02X}  AccessNo={f['access_no']}  Status=0x{f['status']:02X}")
+    # Collect mapped values
+    mapped = []
+    for r in parsed["records"]:
+        if "special" in r: continue
+        m = as_human(r)
+        if m:
+            mapped.append(m)
+    # De-duplicate by key (keep last)
+    out = {}
+    for k, v, u in mapped:
+        out[k] = (v, u)
+    # Pretty print
+    print("Values:")
+    for k in sorted(out.keys()):
+        v, u = out[k]
+        if isinstance(v, float) and (u in ("kWh","m³","m³/h","°C","K")):
+            print(f"  {k}: {v:.3f} {u}".rstrip())
+        else:
+            print(f"  {k}: {v} {u}".rstrip())
+    # Optional: generic fallback lines for unknowns
+    if also_dump_generic:
+        print("\n(Decoded records, raw):")
+        for r in parsed["records"]:
+            if "special" in r:
+                print(f"  @+{r['ofs']:03d}: special {hex(r['DIF'])}"); continue
+            raw_hex = r['raw'].hex() if isinstance(r['raw'], (bytes,bytearray)) else (r['raw'] or b"").hex()
+            val = r['value']
+            if isinstance(val, bytes): val = val.hex()
+            print(f"  @+{r['ofs']:03d}: DIF=0x{r['DIF']:x} VIF=0x{r['VIF']:x} VIFEs={[hex(x) for x in r['VIFEs']]} value={val} raw={raw_hex}")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -216,6 +287,7 @@ def main():
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--save")
     ap.add_argument("--sniff", action="store_true")
+    ap.add_argument("--show-generic", action="store_true")
     args = ap.parse_args()
 
     addr = int(args.addr, 0)
@@ -238,11 +310,16 @@ def main():
                     ser.timeout  = 0.15
 
                 buf = read_window(ser, args.window, debug=args.debug, save_fh=save_fh)
-                if buf:
-                    got = print_frames_from(buf)
-                    if not got and not args.debug:
-                        print(f"[RX] {len(buf)} bytes (no valid M-Bus frame found)")
-                else:
+                work = buf
+                any_frame = False
+                while True:
+                    fr, work = find_next_frame(work)
+                    if not fr: break
+                    if fr[0] == 0x68 and mbus_checksum_ok(fr):
+                        any_frame = True
+                        parsed = parse_long_frame(fr)
+                        print_human(parsed, also_dump_generic=args.show_generic)
+                if not any_frame:
                     print(".", end="", flush=True)
                 time.sleep(args.cycle)
         except KeyboardInterrupt:
