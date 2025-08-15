@@ -5,11 +5,7 @@ echo "🏠 Setting up Home Assistant Development Environment"
 echo "=================================================="
 
 # Create development directory structure
-mkdir -p ha_dev/{config,custom_components}
-
-# Copy our integration
-echo "📁 Copying UltraLite PRO integration..."
-cp -r custom_components/ultralite_pro ha_dev/custom_components/
+mkdir -p ha_dev/config
 
 # Create basic Home Assistant configuration
 cat > ha_dev/config/configuration.yaml << 'EOF'
@@ -64,7 +60,7 @@ EOF
 echo "✅ Development environment created in ha_dev/"
 echo ""
 echo "🚀 To start Home Assistant:"
-echo "   cd ha_dev && docker-compose up -d"
+echo "   cd ha_dev && docker compose up -d"
 echo ""
 echo "🌐 Access at: http://localhost:8123"
-echo "📊 Check logs: docker-compose logs -f homeassistant"
+echo "📊 Check logs: docker compose logs -f homeassistant"

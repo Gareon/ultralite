@@ -142,28 +142,38 @@ class UltraLiteProSensor(CoordinatorEntity, SensorEntity):
         self._sensor_key = sensor_key
         self._sensor_config = SENSOR_TYPES[sensor_key]
         
-        # Get device info from coordinator data
-        device_data = coordinator.data or {}
-        device_id = device_data.get("device_id", "unknown")
-        serial_number = device_data.get("serial_number", {}).get("value") if device_data.get("serial_number") else None
-        
-        self._device_serial = serial_number or str(device_id)
+        # Use config entry ID as fallback for device serial
+        self._device_serial = config_entry.entry_id
         
         # Entity attributes
         self._attr_name = self._sensor_config["name"]
-        self._attr_unique_id = f"{self._device_serial}_{sensor_key}"
+        self._attr_unique_id = f"{config_entry.entry_id}_{sensor_key}"
         self._attr_device_class = self._sensor_config.get("device_class")
         self._attr_state_class = self._sensor_config.get("state_class")
         self._attr_native_unit_of_measurement = self._sensor_config.get("unit")
         self._attr_icon = self._sensor_config.get("icon")
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        # Get device info from coordinator data if available
+        device_data = self.coordinator.data or {}
+        device_id = device_data.get("device_id", "unknown")
+        serial_number = device_data.get("serial_number", {}).get("value") if device_data.get("serial_number") else None
         
-        # Device info
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._device_serial)},
+        device_serial = serial_number or str(device_id) or self._config_entry.entry_id
+        
+        # Update unique_id and device_serial if we have real data
+        if serial_number and self._device_serial == self._config_entry.entry_id:
+            self._device_serial = serial_number
+            self._attr_unique_id = f"{serial_number}_{self._sensor_key}"
+        
+        return DeviceInfo(
+            identifiers={(DOMAIN, device_serial)},
             name=f"{MANUFACTURER} {MODEL}",
             manufacturer=MANUFACTURER,
             model=MODEL,
-            serial_number=self._device_serial,
+            serial_number=device_serial,
             sw_version=self._get_software_version(),
             hw_version=self._get_firmware_version(),
         )
@@ -218,10 +228,6 @@ class UltraLiteProSensor(CoordinatorEntity, SensorEntity):
         attrs = {}
         
         if self.coordinator.data:
-            # Add last update time
-            if self.coordinator.last_update_success_time:
-                attrs["last_update"] = self.coordinator.last_update_success_time.isoformat()
-            
             # Add device information for certain sensors
             if self._sensor_key == "serial_number":
                 device_data = self.coordinator.data
