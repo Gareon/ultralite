@@ -1,0 +1,116 @@
+Home Assistant Integration Development Prompt
+===========================================
+
+## Task Overview
+Create a complete Home Assistant integration for the Itron/Integral-V UltraLite PRO energy meter that reads data via USB IR interface using M-Bus protocol. The integration should be deployable via HACS and follow Home Assistant best practices.
+
+## Technical Foundation
+You have access to a working Python script (`read_ultralite_pyserial.py`) that successfully communicates with the meter. Key technical details:
+
+### Communication Protocol
+- Device: Itron/Integral-V UltraLite PRO energy meter
+- Interface: USB IR reader (typically /dev/ttyUSBx)
+- Protocol: M-Bus over serial
+- Sequence: Wakeup (0x55 @ 2400 8N1) → Commands (SND_NKE + REQ_UD2 @ 2400 8E1)
+
+### Available Data Points
+The meter provides these measurable values:
+- **energy_total** (kWh): Cumulative energy consumption
+- **volume_total** (m³): Cumulative volume 
+- **volume_flow** (m³/h): Current flow rate
+- **flow_temperature** (°C): Supply temperature
+- **return_temperature** (°C): Return temperature
+- **delta_temperature** (K): Temperature difference
+- **thermal_power** (kW): Calculated thermal power (1.163 * flow * delta_temp)
+- **operating_time_days** (days): Device operational time
+- **serial_number**: Device identifier
+- **firmware_version**: Device firmware version
+- **software_version**: Device software version
+
+### Key Functions Available for Reuse
+- `parse_long_frame()`: Parses M-Bus frames into structured data
+- `record_to_human()`: Maps VIF codes to human-readable values
+- `send_wakeup_8N1()` + `send_cmds_8E1()`: Communication sequence
+- `read_window()`: Reads serial data with timeout
+- VIF_MAP: Complete mapping of meter data fields
+
+## Integration Requirements
+
+### Configuration
+- **UI Configuration**: Must be configurable through Home Assistant UI (config flow)
+- **USB Device**: Configurable USB device path (default: /dev/ttyUSB0)
+- **Update Interval**: Configurable polling interval for automatic updates - can be set to 0 to disable automatic updates
+- **Primary Address**: Configurable M-Bus address (default: 0xFE)
+
+### Functionality
+- **Automatic Updates**: Regular polling based on configured interval
+- **Manual Update Service**: Provide service for immediate data refresh
+- **Sensor Entities**: Create individual sensors for each data point with proper (all attached to a "device"):
+  - Device classes (energy, temperature, etc.)
+  - State classes (measurement, total_increasing)
+  - Units of measurement
+  - Friendly names and translations
+  - Icons where appropriate
+
+### Error Handling & Reliability
+- **Device Disconnection**: Handle USB device removal gracefully
+  - Set sensors to "unavailable" when device unreachable
+  - Preserve total/cumulative values (energy_total, volume_total as well as metadata like serial number and so on for the device)
+  - Attempt automatic reconnection
+- **Communication Errors**: Handle and report these specific issues:
+  - "USB device not found" 
+  - "Target device not responding"
+  - "Target device response not understood"
+- **Recovery**: Implement retry logic with exponential backoff (not affecting the refresh interval)
+- **Logging**: Proper debug/info/warning/error logging
+
+### HACS Deployment
+- **Structure**: Follow Home Assistant custom integration structure
+- **Manifest**: Proper manifest.json for HACS compatibility
+- **Documentation**: Include README with installation and configuration instructions
+
+## Technical Implementation Guidelines
+
+### Integration Structure
+```
+custom_components/ultralite_pro/
+├── __init__.py          # Integration setup, device registry
+├── config_flow.py       # UI configuration flow
+├── const.py            # Constants and configuration schema
+├── coordinator.py      # Data update coordinator
+├── sensor.py           # Sensor entities
+├── manifest.json       # Integration metadata
+└── translations/       # UI translations
+    └── en.json
+```
+
+### Data Flow
+1. **Setup**: Initialize coordinator with configured serial port and interval
+2. **Communication**: Use existing M-Bus communication functions
+3. **Parsing**: Leverage existing VIF mapping and frame parsing
+4. **Updates**: Coordinator manages polling and error handling
+5. **Entities**: Sensors subscribe to coordinator for data updates
+
+### Entity Configuration
+Exclude `time_point` as requested, but include all other values as sensors with:
+- Proper device_class (energy, temperature, volume, etc.)
+- Correct state_class (measurement, total_increasing)
+- Appropriate units and scaling
+- Meaningful friendly names
+
+### Error Resilience
+- Implement device reconnection logic
+- Maintain state persistence for critical values
+- Provide clear error messages to users
+- Use Home Assistant's built-in retry mechanisms
+
+## Deliverables Expected
+1. Complete custom integration following HA structure
+2. Config flow for UI-based setup
+3. Robust error handling and recovery
+4. Proper entity definitions with device/state classes
+5. HACS-compatible manifest and documentation
+6. Service for manual updates
+7. Translations for UI elements
+
+The integration should be production-ready, following Home Assistant development best practices, and suitable for community use via HACS.

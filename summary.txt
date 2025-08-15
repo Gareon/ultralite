@@ -1,88 +1,76 @@
-hexdump(b, width=16) → generator of lines
-Formats raw bytes as hex + ASCII for debug logs.
+UltraLite M-Bus Reader Script Summary
+======================================
 
-mbus_checksum_ok(frame: bytes) -> bool
-Validates M-Bus long frame checksum using the “L excludes CS” rule: 68 L L 68 C A CI [DATA] CS 16. 
-m-bus.com
+## Core Purpose
+This script reads data from an Itron/Integral-V UltraLite PRO energy meter using PySerial over USB IR interface with M-Bus protocol.
 
-find_next_frame(buf: bytes) -> (frame|None, remaining)
-Scans a buffer and extracts the next ACK (E5), short (10 … 16), or valid long (68 … 16) frame.
+## Communication Protocol
+- Wakeup sequence: 0x55 @ 2400 8N1 for ~2.2 seconds
+- Commands: SND_NKE + REQ_UD2 @ 2400 8E1 
+- Uses primary address (default 0xFE)
 
-decode_bcd_le(data: bytes) -> int
-Decodes little-endian packed BCD (ignores 0xF nibbles).
+## Key Methods
 
-man_code_from_word(w: int) -> str
-Converts the 2-byte manufacturer field into a 3-letter code (e.g., ITR).
+### Debug/Utility Functions
+- `hexdump(b, width=16)`: Formats bytes as hex dump with ASCII representation
+- `mbus_checksum_ok(fr)`: Validates M-Bus frame checksum and structure
+- `find_next_frame(buf)`: Extracts valid M-Bus frames from byte buffer
 
-parse_long_frame(fr: bytes) -> dict
-Parses a valid long frame into:
+### Data Decoding Functions
+- `decode_bcd_le(data)`: Converts little-endian packed BCD to integer
+- `man_code_from_word(w)`: Decodes 16-bit manufacturer code to 3-letter string
+- `parse_long_frame(fr)`: Parses complete M-Bus long frame into structured data
+- `record_to_human(r)`: Maps VIF codes to human-readable values using VIF_MAP
 
-fixed: { id (BCD), manufacturer, version, medium, access_no, status, signature }
+### Serial Communication Functions
+- `short_frame(ctrl, addr)`: Creates M-Bus short frame with checksum
+- `send_wakeup_8N1(ser, debug)`: Sends wakeup sequence at 2400 8N1
+- `send_cmds_8E1(ser, addr, debug)`: Sends SND_NKE + REQ_UD2 at 2400 8E1
+- `read_window(ser, window_s, debug, save_fh)`: Reads serial data within time window
 
-records: list of generic items { ofs, DIF, DIFEs, VIF, VIFEs, raw, value }, where value is a basic int/float/BCD decode (no units yet).
+### Output Functions
+- `print_human(parsed, show_generic, compute_power)`: Displays parsed values in readable format
+- `main()`: Main loop handling command line args and continuous reading
 
-VIF_MAP (core application mapping)
-Maps known VIF codes → (name, convert, unit) to produce named, unit-correct values:
+## Value Mappings (VIF_MAP)
+The script maps M-Bus VIF (Value Information Field) codes to meaningful values:
 
-0x06 → energy_total (kWh)
+### Energy & Volume
+- 0x06: energy_total (kWh) - cumulative energy consumption
+- 0x14: volume_total (m³, 0.01 resolution) - cumulative volume in BCD format
+- 0x38-0x3F: volume_flow (m³/h) - current flow rate with variable scaling
 
-0x14 → volume_total (m³, 0.01 m³ resolution)
+### Temperature
+- 0x5A: flow_temperature (°C, 0.1 resolution) - supply temperature
+- 0x5E: return_temperature (°C, 0.1 resolution) - return temperature  
+- 0x61: delta_temperature (K, 0.01 resolution) - temperature difference
 
-0x38..0x3F → volume_flow (m³/h, scale 10^(n−6))
+### Device Information
+- 0x27: operating_time_days (days) - device operational time
+- 0x6D: time_point (epoch seconds -> ISO-8601) - timestamp
+- 0x78: serial_number (8-digit BCD) - device serial number
 
-0x5A → flow_temperature (°C, /10)
+### Extended VIF (0xFD + VIFE)
+- 0x0E: firmware_version (uint8)
+- 0x0F: software_version (uint8)
+- 0x08: access_number (uint8)
+- 0x09: medium_code (uint8)
 
-0x5E → return_temperature (°C, /10)
+## Derived Values
+- thermal_power (kW): Calculated as 1.163 * volume_flow(m³/h) * delta_temperature(K)
 
-0x61 → delta_temperature (K, /100)
+## Command Line Options
+- port: Serial device (default /dev/ttyUSB0)
+- --addr: Primary address (default 0xFE) 
+- --window: Read window duration (default 2.5s)
+- --cycle: Pause between cycles (default 0.5s)
+- --debug: Enable raw hex output
+- --save: Save raw bytes to file
+- --sniff: Listen-only mode (no commands sent)
+- --show-generic: Show unmapped records
 
-0x6D → timestamp (epoch seconds → ISO-8601; vendor-specific “time point”)
-
-0x78 → serial_number (fabrication number, BCD)
-
-0x27 → operating_time_days (days)
-Unmapped items fall back to a generic “volume_scaled” path for the 0x20..0x27 family if enabled. 
-2Flow AB
-molline.de
-m-bus.com
-
-VIF_EXT_MAP (extensions for VIF = 0xFD)
-Maps VIFE codes (first extension, 7-bit) → named items:
-
-0x0E → firmware_version
-
-0x0F → software_version
-
-0x08 → access_number
-
-0x09 → medium_code
-(Extended VIF behavior per spec: when VIF == 0xFD/0xFB, the “true” VIF is in the first VIFE.) 
-m-bus.com
-
-record_to_human(record) -> (key, value, unit) | None
-Applies VIF_MAP/VIF_EXT_MAP to a single parsed record and returns a typed, unit-correct tuple (or None if unknown).
-
-short_frame(ctrl, addr) -> bytes
-Builds a control short frame (10 C A CS 16) for SND_NKE / REQ_UD2.
-
-send_wakeup_8N1(ser, debug=False)
-Sends ~2.2 s of 0x55 at 2400 8N1 to wake the meter’s IR head (drains port, small pause).
-
-send_cmds_8E1(ser, addr, debug=False)
-Switches to 2400 8E1; sends SND_NKE then REQ_UD2 (default address 0xFE broadcast).
-
-read_window(ser, window_s, debug=False, save_fh=None) -> bytes
-Collects all RX bytes during a time window (optionally hexdumps/saves).
-
-print_human(parsed, show_generic=False, compute_power=True)
-Prints a single structured block:
-
-Meter header from fixed
-
-“Values:” list from mapped items (sorted by a preferred order; suppresses units when empty)
-
-Optionally the raw generic record list
-If both volume_flow and delta_temperature are present, it also computes thermal_power in kW using 1.163 × m³/h × K (ρ≈1 kg/L, c≈4.186 kJ/kgK).
-
-main()
-Opens the serial port and loops: wake → request → read → parse → print (or --sniff to just listen). CLI options: --addr, --window, --cycle, --debug, --save, --show-generic.
+## Error Handling
+- Frame validation with checksums
+- Timeout handling for serial communication
+- Graceful handling of invalid/incomplete frames
+- Keyboard interrupt handling
