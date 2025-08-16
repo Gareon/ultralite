@@ -1,0 +1,80 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "UltraLite PRO Energiezähler",
+        "description": "Konfigurieren Sie Ihre UltraLite PRO Energiezähler-Verbindung.",
+        "data": {
+          "usb_path": "USB-Gerätepfad",
+          "update_interval": "Aktualisierungsintervall (Sekunden)",
+          "primary_address": "Primäradresse"
+        },
+        "data_description": {
+          "usb_path": "Pfad zum USB-IR-Gerät (z.B. /dev/ttyUSB0)",
+          "update_interval": "Wie oft der Zähler abgefragt werden soll (10-3600 Sekunden, 0 zum Deaktivieren)",
+          "primary_address": "M-Bus Primäradresse (Hex-Format wie 0xFE oder dezimal)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum Zähler fehlgeschlagen",
+      "usb_device_not_found": "USB-Gerät am angegebenen Pfad nicht gefunden",
+      "permission_denied": "Zugriff auf USB-Gerät verweigert",
+      "target_device_not_responding": "Zielgerät antwortet nicht",
+      "invalid_address": "Ungültiges Primäradressenformat",
+      "unknown": "Unerwarteter Fehler aufgetreten"
+    },
+    "abort": {
+      "already_configured": "Gerät ist bereits konfiguriert"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "energy_total": {
+        "name": "Gesamtenergie"
+      },
+      "volume_total": {
+        "name": "Gesamtvolumen"
+      },
+      "volume_flow": {
+        "name": "Volumenstrom"
+      },
+      "flow_temperature": {
+        "name": "Vorlauftemperatur"
+      },
+      "return_temperature": {
+        "name": "Rücklauftemperatur"
+      },
+      "delta_temperature": {
+        "name": "Temperaturdifferenz"
+      },
+      "thermal_power": {
+        "name": "Thermische Leistung"
+      },
+      "operating_time_days": {
+        "name": "Betriebszeit"
+      },
+      "serial_number": {
+        "name": "Seriennummer"
+      },
+      "firmware_version": {
+        "name": "Firmware-Version"
+      },
+      "software_version": {
+        "name": "Software-Version"
+      }
+    }
+  },
+  "services": {
+    "update_sensors": {
+      "name": "Sensoren aktualisieren",
+      "description": "Sensorwerte manuell vom Zähler aktualisieren.",
+      "fields": {
+        "device_id": {
+          "name": "Geräte-ID",
+          "description": "Geräte-ID zum Aktualisieren (optional, aktualisiert alle Geräte wenn nicht angegeben)"
+        }
+      }
+    }
+  }
+}
