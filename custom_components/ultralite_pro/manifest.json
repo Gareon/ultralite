@@ -1,10 +1,10 @@
 {
   "domain": "ultralite_pro",
   "name": "UltraLite PRO Energy Meter",
-  "codeowners": ["@user"],
+  "codeowners": ["@Gareon"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/user/ultralite-pro-hass",
+  "documentation": "https://github.com/Gareon/ultralite",
   "integration_type": "device",
   "iot_class": "local_polling",
   "requirements": ["pyserial==3.5"],
