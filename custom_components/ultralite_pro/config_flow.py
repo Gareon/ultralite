@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
@@ -96,6 +96,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        """Get the options flow for this handler."""
+        return OptionsFlowHandler(config_entry)
+
     async def async_step_user(
         self, user_input: Optional[Dict[str, Any]] = None
     ) -> FlowResult:
@@ -159,3 +165,79 @@ class DeviceNotResponding(HomeAssistantError):
 
 class InvalidPrimaryAddress(HomeAssistantError):
     """Error to indicate invalid primary address."""
+
+
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle a option flow for UltraLite PRO Energy Meter."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self.config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Manage the options."""
+        errors = {}
+        
+        if user_input is not None:
+            try:
+                # Validate the input like in the main config flow
+                await validate_input(self.hass, user_input)
+                
+                # Parse primary address for storage
+                if user_input[CONF_PRIMARY_ADDRESS].startswith("0x"):
+                    primary_address = int(user_input[CONF_PRIMARY_ADDRESS], 16)
+                else:
+                    primary_address = int(user_input[CONF_PRIMARY_ADDRESS])
+                
+                # Update the config entry data
+                new_data = {**self.config_entry.data}
+                new_data[CONF_USB_PATH] = user_input[CONF_USB_PATH]
+                new_data[CONF_UPDATE_INTERVAL] = user_input[CONF_UPDATE_INTERVAL]
+                new_data[CONF_PRIMARY_ADDRESS] = primary_address
+                
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                
+                return self.async_create_entry(title="", data={})
+                
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except USBNotFound:
+                errors[CONF_USB_PATH] = ERROR_USB_NOT_FOUND
+            except PermissionDenied:
+                errors[CONF_USB_PATH] = ERROR_PERMISSION_DENIED
+            except DeviceNotResponding:
+                errors["base"] = ERROR_DEVICE_NOT_RESPONDING
+            except InvalidPrimaryAddress:
+                errors[CONF_PRIMARY_ADDRESS] = "invalid_address"
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected exception")
+                errors["base"] = "unknown"
+
+        # Create schema with current values as defaults
+        current_usb_path = self.config_entry.data.get(CONF_USB_PATH, DEFAULT_USB_PATH)
+        current_interval = self.config_entry.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+        current_address = self.config_entry.data.get(CONF_PRIMARY_ADDRESS, DEFAULT_PRIMARY_ADDRESS)
+        
+        # Format address for display
+        if isinstance(current_address, int):
+            address_display = f"0x{current_address:02X}"
+        else:
+            address_display = str(current_address)
+
+        options_schema = vol.Schema({
+            vol.Required(CONF_USB_PATH, default=current_usb_path): cv.string,
+            vol.Required(CONF_UPDATE_INTERVAL, default=current_interval): vol.All(
+                cv.positive_int, vol.Range(min=10, max=3600)
+            ),
+            vol.Required(CONF_PRIMARY_ADDRESS, default=address_display): cv.string,
+        })
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=options_schema,
+            errors=errors,
+        )
