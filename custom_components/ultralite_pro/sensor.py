@@ -145,7 +145,8 @@ class UltraLiteProSensor(CoordinatorEntity, SensorEntity):
         # Use config entry ID as fallback for device serial
         self._device_serial = config_entry.entry_id
         
-        # Entity attributes
+        # Entity attributes - Don't set _attr_name to let HA auto-generate with device prefix
+        self._attr_has_entity_name = True  # Enable entity naming
         self._attr_name = self._sensor_config["name"]
         self._attr_unique_id = f"{config_entry.entry_id}_{sensor_key}"
         self._attr_device_class = self._sensor_config.get("device_class")
@@ -168,9 +169,16 @@ class UltraLiteProSensor(CoordinatorEntity, SensorEntity):
             self._device_serial = serial_number
             self._attr_unique_id = f"{serial_number}_{self._sensor_key}"
         
+        # Create a more descriptive device name using serial number or device ID
+        device_name = f"{MANUFACTURER} {MODEL}"
+        if serial_number:
+            device_name = f"{MANUFACTURER} {MODEL} ({serial_number})"
+        elif device_id and device_id != "unknown":
+            device_name = f"{MANUFACTURER} {MODEL} ({device_id})"
+        
         return DeviceInfo(
             identifiers={(DOMAIN, device_serial)},
-            name=f"{MANUFACTURER} {MODEL}",
+            name=device_name,
             manufacturer=MANUFACTURER,
             model=MODEL,
             serial_number=device_serial,
