@@ -2,6 +2,9 @@
 
 A Home Assistant custom integration for the **Itron/Integral-V UltraLite PRO** energy meter that communicates via USB IR interface using the M-Bus protocol.
 
+> [!CAUTION]
+> Almost the whole project, including the documentation, is created using GitHub Copilot. I didn't review it thoroughly, so there might be inaccuracies or errors. Please double-check the information and adapt it to your needs.
+
 ## Features
 
 - 📊 **Real-time Energy Monitoring**: Track total energy consumption, volume flow, temperatures, and thermal power
