@@ -9,7 +9,7 @@ CONF_PRIMARY_ADDRESS = "primary_address"
 
 # Defaults
 DEFAULT_USB_PATH = "/dev/ttyUSB0"
-DEFAULT_UPDATE_INTERVAL = 60  # seconds
+DEFAULT_UPDATE_INTERVAL = 600  # seconds
 DEFAULT_PRIMARY_ADDRESS = 0xFE
 
 # Error states

@@ -40,7 +40,7 @@ SENSOR_TYPES = {
     },
     "volume_total": {
         "name": "Total Volume",
-        "device_class": SensorDeviceClass.VOLUME,
+        "device_class": SensorDeviceClass.WATER,
         "state_class": SensorStateClass.TOTAL_INCREASING,
         "unit": UnitOfVolume.CUBIC_METERS,
         "icon": "mdi:water",
